@@ -1,0 +1,59 @@
+version: 1
+send_anonymous_usage_stats: true
+project_id: tap-groundtruth
+default_environment: test
+venv:
+  backend: uv
+environments:
+- name: test
+plugins:
+  extractors:
+  - name: tap-groundtruth
+    namespace: tap_groundtruth
+    pip_url: -e .
+    capabilities:
+    - state
+    - catalog
+    - discover
+    - about
+    - stream-maps
+
+    # TODO: Declare settings and their types here:
+    settings_group_validation:
+    - [user_id, api_key, organization_id]
+
+    # TODO: Declare default configuration values here:
+    settings:
+    - name: user_id
+      label: User ID
+      description: The user ID for API authentication
+    - name: api_key
+      kind: string
+      label: API Key
+      description: The API key for authentication
+      sensitive: true
+    - name: start_date
+      kind: date_iso8601
+      label: Start Date
+      description: Initial date to start extracting data from
+    - name: account_ids
+      label: Account IDs
+      description: Optional comma-separated list of account IDs to sync. If not provided,
+        all accounts will be synced.
+    - name: organization_id
+      label: Organization ID
+      description: The organization ID to fetch accounts for
+      required: true
+    config:
+      start_date: '2025-05-01T00:00:00Z'
+      api_key: example_api_key
+      user_id: '555444'
+      organization_id: '333333'
+      account_ids: '333333'  # Example usage: uncomment and set to filter accounts
+    select:
+    - accounts.*
+    - creative_stats.*
+  loaders:
+  - name: target-jsonl
+    variant: andyh1203
+    pip_url: target-jsonl
