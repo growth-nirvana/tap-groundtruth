@@ -1,136 +1,148 @@
 # tap-groundtruth
 
-`tap-groundtruth` is a Singer tap for GroundTruth.
+A [Singer](https://www.singer.io/) tap for extracting data from the GroundTruth API, built with the [Meltano Singer SDK](https://sdk.meltano.com/).
 
-Built with the [Meltano Tap SDK](https://sdk.meltano.com) for Singer Taps.
+## Features
+- Extracts campaign, creative, location, publisher, and demographic stats from GroundTruth.
+- Supports incremental sync with configurable lookback window.
+- Robust error handling and retry logic for API requests.
+- Flexible account selection and stream discovery.
 
-<!--
+---
 
-Developer TODO: Update the below as needed to correctly describe the install procedure. For instance, if you do not have a PyPI repo, or if you want users to directly install from your git repo, you can modify this step as appropriate.
+## Requirements
+- Python 3.8+
+- [Meltano](https://meltano.com/) (recommended) or standalone Singer-compatible runner
+- Access to the GroundTruth API (user ID and API key)
+
+---
 
 ## Installation
 
-Install from PyPI:
+### With Meltano (recommended)
+1. Install [Meltano](https://docs.meltano.com/getting-started/installation/):
+   ```bash
+   pipx install meltano
+   # or
+   pip install meltano
+   ```
+2. Add the tap to your Meltano project:
+   ```bash
+   meltano add extractor tap-groundtruth
+   ```
 
-```bash
-pipx install tap-groundtruth
-```
+### Standalone (for development)
+1. Clone this repo:
+   ```bash
+   git clone <repo-url>
+   cd tap-groundtruth
+   ```
+2. Install dependencies:
+   ```bash
+   pip install -e .
+   ```
 
-Install from GitHub:
-
-```bash
-pipx install git+https://github.com/ORG_NAME/tap-groundtruth.git@main
-```
-
--->
+---
 
 ## Configuration
 
-### Accepted Config Options
+Create a `meltano.yml` or `config.json` with the following required settings:
 
-<!--
-Developer TODO: Provide a list of config options accepted by the tap.
+| Setting           | Description                                 | Required |
+|-------------------|---------------------------------------------|----------|
+| `user_id`         | Your GroundTruth user ID                     | Yes      |
+| `api_key`         | Your GroundTruth API key                     | Yes      |
+| `organization_id` | Organization ID to fetch accounts for        | Yes      |
+| `start_date`      | Earliest record date to sync (YYYY-MM-DD)    | Yes      |
+| `account_ids`     | Comma-separated list of account IDs to sync  | No       |
+| `lookback_days`   | Days to look back from bookmark (default: 7) | No       |
 
-This section can be created by copy-pasting the CLI output from:
-
+**Example `config.json`:**
+```json
+{
+  "user_id": "your_user_id",
+  "api_key": "your_api_key",
+  "organization_id": "your_org_id",
+  "start_date": "2025-05-01",
+  "lookback_days": 7
+}
 ```
-tap-groundtruth --about --format=markdown
-```
--->
 
-A full list of supported settings and capabilities for this
-tap is available by running:
-
-```bash
-tap-groundtruth --about
-```
-
-### Configure using environment variables
-
-This Singer tap will automatically import any environment variables within the working directory's
-`.env` if the `--config=ENV` is provided, such that config values will be considered if a matching
-environment variable is set either in the terminal context or in the `.env` file.
-
-### Source Authentication and Authorization
-
-<!--
-Developer TODO: If your tap requires special access on the source system, or any special authentication requirements, provide those here.
--->
+---
 
 ## Usage
 
-You can easily run `tap-groundtruth` by itself or in a pipeline using [Meltano](https://meltano.com/).
+### With Meltano
 
-### Executing the Tap Directly
+1. **Discover available streams:**
+   ```bash
+   meltano select tap-groundtruth
+   ```
+2. **Run a sync:**
+   ```bash
+   meltano run tap-groundtruth target-jsonl
+   ```
+3. **Select specific streams:**
+   In `meltano.yml`:
+   ```yaml
+   select:
+     - creative_stats
+     - campaign_publisher_stats
+     - location_zipcode_stats
+     - location_dma_stats
+     - campaign_demographic_stats
+   ```
 
-```bash
-tap-groundtruth --version
-tap-groundtruth --help
-tap-groundtruth --config CONFIG --discover > ./catalog.json
-```
-
-## Developer Resources
-
-Follow these instructions to contribute to this project.
-
-### Initialize your Development Environment
-
-Prerequisites:
-
-- Python 3.9+
-- [uv](https://docs.astral.sh/uv/)
-
-```bash
-uv sync
-```
-
-### Create and Run Tests
-
-Create tests within the `tests` subfolder and
-then run:
+### Standalone Singer
 
 ```bash
-uv run pytest
+# Discover catalog
+./tap-groundtruth --config config.json --discover > catalog.json
+# Run sync
+./tap-groundtruth --config config.json --catalog catalog.json --state state.json
 ```
 
-You can also test the `tap-groundtruth` CLI interface directly using `uv run`:
+---
 
-```bash
-uv run tap-groundtruth --help
-```
+## Streams
+- `creative_stats`
+- `campaign_publisher_stats`
+- `campaign_demographic_stats`
+- `location_zipcode_stats`
+- `location_dma_stats`
+- `accounts`
+- `campaigns`
 
-### Testing with [Meltano](https://www.meltano.com)
+---
 
-_**Note:** This tap will work in any Singer environment and does not require Meltano.
-Examples here are for convenience and to streamline end-to-end orchestration scenarios._
+## Incremental Sync & Lookback
+- All reporting streams support incremental sync using a `date` replication key.
+- The `lookback_days` config (default: 7) ensures each sync re-fetches the last N days for late-arriving data.
+- Bookmarks are managed automatically by Meltano/Singer.
 
-<!--
-Developer TODO:
-Your project comes with a custom `meltano.yml` project file already created. Open the `meltano.yml` and follow any "TODO" items listed in
-the file.
--->
+---
 
-Next, install Meltano (if you haven't already) and any needed plugins:
+## Error Handling & Retries
+- All HTTP requests use robust retry logic (5 attempts, exponential backoff) for 5xx and 429 errors.
+- Errors and failed responses are logged with details for troubleshooting.
 
-```bash
-# Install meltano
-pipx install meltano
-# Initialize meltano within this directory
-cd tap-groundtruth
-meltano install
-```
+---
 
-Now you can test and orchestrate using Meltano:
+## Troubleshooting
+- **500 Server Error:** Usually a GroundTruth API issue. The tap will retry automatically. If persistent, check your parameters or contact GroundTruth support.
+- **Type errors on `date`:** Ensure you are using the latest version; all date fields are now ISO8601 strings.
+- **No data:** Check your `account_ids`, `start_date`, and stream selection.
+- **Debug logs:** Enable more verbose logging by setting the `LOG_LEVEL` environment variable:
+  ```bash
+  export LOG_LEVEL=DEBUG
+  ```
 
-```bash
-# Test invocation:
-meltano invoke tap-groundtruth --version
+---
 
-# OR run a test ELT pipeline:
-meltano run tap-groundtruth target-jsonl
-```
+## Contributing
+Pull requests and issues are welcome! Please open an issue to discuss major changes first.
 
-### SDK Dev Guide
+---
 
-See the [dev guide](https://sdk.meltano.com/en/latest/dev_guide.html) for more instructions on how to use the SDK to
-develop your own taps and targets.
+## License
+MIT
