@@ -66,6 +66,14 @@ class TapGroundTruth(Tap):
             title="Account IDs",
             description="Optional comma-separated list of account IDs to sync. If not provided, all accounts will be synced.",
         ),
+        th.Property(
+            "lookback_days",
+            th.IntegerType(),
+            required=False,
+            title="Lookback Days",
+            description="Number of days to look back from the bookmark for incremental syncs. Default is 7.",
+            default=7,
+        ),
     ).to_dict()
 
     def discover_streams(self) -> list[streams.GroundTruthStream]:
@@ -78,6 +86,10 @@ class TapGroundTruth(Tap):
             streams.CreativeStatsStream(self),
             streams.CampaignsStream(self),
             streams.AccountsStream(self),
+            streams.LocationZipcodeStatsStream(self),
+            streams.LocationDMAStatsStream(self),
+            streams.CampaignPublisherStatsStream(self),
+            streams.CampaignDemographicStatsStream(self),
         ]
 
 

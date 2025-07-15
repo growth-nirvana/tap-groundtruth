@@ -46,9 +46,9 @@ class CreativeStatsStream(GroundTruthStream):
     name = "creative_stats"
     path = None  # Will be set dynamically per campaign
     primary_keys = ["id"]  # Adjust if the real primary key is different
-    # replication_key = "date"
+    replication_key = "date"
     schema = th.PropertiesList(
-        th.Property("date", th.StringType),
+        th.Property("date", th.DateTimeType),
         th.Property("organization_name", th.StringType),
         th.Property("account_id", th.IntegerType),
         th.Property("account_name", th.StringType),
@@ -169,10 +169,11 @@ class CreativeStatsStream(GroundTruthStream):
                 stats_headers["Accept"] = "application/json"
                 stats_headers["User-Agent"] = "curl/7.79.1"
                 stats_headers["Accept-Encoding"] = "gzip, deflate"
-                # Determine start_date for incremental sync
+                # Determine start_date for incremental sync with lookback
+                lookback_days = int(self.config.get("lookback_days", 7))
                 starting_timestamp = self.get_starting_timestamp(context)
                 if starting_timestamp:
-                    start_date = starting_timestamp.date()
+                    start_date = starting_timestamp.date() - datetime.timedelta(days=lookback_days)
                 else:
                     start_date = self._parse_date(self.config["start_date"])
                 # Always require end_date, default to today if not provided
@@ -200,18 +201,23 @@ class CreativeStatsStream(GroundTruthStream):
                     stats_response.raise_for_status()
                     try:
                         for record in stats_response.json():
+                            LOGGER.info(f"Record Date: {record['date']}")
+                            # Coerce 'date' to a Python date object for Singer SDK compatibility
+                            if "date" in record and isinstance(record["date"], str):
+                                try:
+                                    record["date"] = datetime.datetime.strptime(record["date"], "%Y-%m-%d").date()
+                                except Exception as e:
+                                    LOGGER.error(f"Failed to parse date field: {record['date']}")
+                                    raise
+                            # Ensure 'date' is always a string for Singer SDK compatibility
+                            if "date" in record and isinstance(record["date"], (datetime.date, datetime.datetime)):
+                                record["date"] = record["date"].isoformat()
                             yield record
                     except Exception as e:
                         LOGGER.error("Failed to decode stats response as JSON: %s", e)
                         LOGGER.error("Raw response: %s", stats_response.text)
                         raise
                     current_start = current_end + datetime.timedelta(days=1)
-
-    def post_process(self, row, context=None):
-        # Coerce 'date' to YYYY-MM-DD format for incremental sync compatibility
-        if row.get("date") and isinstance(row["date"], str):
-            row["date"] = row["date"][:10]
-        return row
 
 
 class CampaignsStream(GroundTruthStream):
@@ -344,3 +350,338 @@ class AccountsStream(GroundTruthStream):
             if isinstance(account_out.get("accountType"), dict):
                 account_out["accountType"] = str(account_out["accountType"])
             yield account_out
+
+
+class LocationStatsStreamBase(GroundTruthStream):
+    """Base stream for campaign location stats by location_type."""
+
+    name = None  # To be set by subclass
+    location_type = None  # To be set by subclass
+    path = None
+    primary_keys = ["campaign_id", "zip", "date"]  # Subclass may override
+    replication_key = "date"
+    schema = th.PropertiesList(
+        th.Property("date", th.DateTimeType),
+        th.Property("account_name", th.StringType),
+        th.Property("campaign_id", th.IntegerType),
+        th.Property("campaign_name", th.StringType),
+        th.Property("zip", th.StringType),
+        th.Property("latitude", th.NumberType),
+        th.Property("longitude", th.NumberType),
+        th.Property("dma", th.IntegerType),
+        th.Property("city", th.StringType),
+        th.Property("state", th.StringType),
+        th.Property("country", th.StringType),
+        th.Property("impressions", th.IntegerType),
+        th.Property("clicks", th.IntegerType),
+        th.Property("spend", th.NumberType),
+        th.Property("ctr", th.NumberType),
+        th.Property("secondary_actions", th.IntegerType),
+        th.Property("visits", th.IntegerType),
+        th.Property("coupon", th.IntegerType),
+        th.Property("website", th.IntegerType),
+        th.Property("moreinfo", th.IntegerType),
+        th.Property("directions", th.IntegerType),
+        th.Property("click_to_call", th.IntegerType),
+    ).to_dict()
+
+    def get_records(self, context):
+        org_id = self.config["organization_id"]
+        accounts_url = f"{RESOURCE_API_BASE}/organizations/{org_id}/accounts"
+        headers = self.http_headers.copy()
+        headers["Accept"] = "application/json"
+        headers["User-Agent"] = "curl/7.79.1"
+        headers["Accept-Encoding"] = "gzip, deflate"
+        response = get_with_retry(accounts_url, headers=headers)
+        response.raise_for_status()
+        accounts = response.json().get("accounts", [])
+        # Filter accounts if account_ids config is provided (comma-separated string)
+        account_ids_config = set()
+        account_ids_str = self.config.get("account_ids")
+        if account_ids_str:
+            account_ids_config = set(s.strip() for s in account_ids_str.split(",") if s.strip())
+        for account in accounts:
+            account_id = account.get("id")
+            if not account_id:
+                continue
+            if account_ids_config and str(account_id) not in account_ids_config:
+                continue
+            campaigns_url = f"{RESOURCE_API_BASE}/campaigns"
+            campaign_headers = headers.copy()
+            campaign_headers["X-GT-ACCOUNT-ID"] = str(account_id)
+            campaign_response = get_with_retry(campaigns_url, headers=campaign_headers)
+            campaign_response.raise_for_status()
+            campaigns = campaign_response.json().get("campaigns", [])
+            for campaign in campaigns:
+                campaign_id = campaign.get("id")
+                if not campaign_id:
+                    continue
+                # Determine start_date for incremental sync with lookback
+                lookback_days = int(self.config.get("lookback_days", 7))
+                starting_timestamp = self.get_starting_timestamp(context)
+                if starting_timestamp:
+                    start_date = starting_timestamp.date() - datetime.timedelta(days=lookback_days)
+                else:
+                    start_date = datetime.datetime.strptime(self.config["start_date"], "%Y-%m-%d").date()
+                end_date_str = self.config.get("end_date")
+                if end_date_str:
+                    end_date = datetime.datetime.strptime(end_date_str, "%Y-%m-%d").date()
+                else:
+                    end_date = datetime.date.today()
+                # 1-day chunking
+                chunk_size = datetime.timedelta(days=1)
+                current_start = start_date
+                while current_start <= end_date:
+                    current_end = current_start  # Only one day per chunk
+                    stats_url = f"{self.url_base}/campaign/location/{campaign_id}"
+                    stats_headers = self.http_headers.copy()
+                    stats_headers["Accept"] = "application/json"
+                    stats_headers["User-Agent"] = "curl/7.79.1"
+                    stats_headers["Accept-Encoding"] = "gzip, deflate"
+                    params = {
+                        "start_date": current_start.strftime("%Y-%m-%d"),
+                        "end_date": current_end.strftime("%Y-%m-%d"),
+                        "location_type": self.location_type,
+                        # Optionally add metric and key if needed
+                    }
+                    stats_response = get_with_retry(stats_url, headers=stats_headers, params=params)
+                    stats_response.raise_for_status()
+                    for record in stats_response.json():
+                        # Add derived date field as a datetime object for Singer SDK compatibility
+                        record["date"] = datetime.datetime.combine(current_start, datetime.time.min)
+                        # Ensure 'date' is always a string for Singer SDK compatibility
+                        if "date" in record and isinstance(record["date"], (datetime.date, datetime.datetime)):
+                            record["date"] = record["date"].isoformat()
+                        yield record
+                    current_start = current_start + chunk_size
+
+class LocationZipcodeStatsStream(LocationStatsStreamBase):
+    name = "location_zipcode_stats"
+    location_type = "zipcode"
+    primary_keys = ["campaign_id", "zip", "date"]
+
+class LocationDMAStatsStream(LocationStatsStreamBase):
+    name = "location_dma_stats"
+    location_type = "dma"
+    primary_keys = ["campaign_id", "dma", "date"]
+
+
+class CampaignPublisherStatsStream(GroundTruthStream):
+    """Stream for campaign-level publisher stats per campaign per day."""
+
+    name = "campaign_publisher_stats"
+    path = None  # Set dynamically per campaign
+    primary_keys = ["campaign_id", "publisher_name", "date"]
+    replication_key = "date"
+    schema = th.PropertiesList(
+        th.Property("date", th.DateTimeType),
+        th.Property("campaign_id", th.IntegerType),
+        th.Property("campaign_name", th.StringType),
+        th.Property("publisher_name", th.StringType),
+        th.Property("imp", th.IntegerType),
+        th.Property("video_start", th.IntegerType),
+        th.Property("video_first_quartile", th.IntegerType),
+        th.Property("video_midpoint", th.IntegerType),
+        th.Property("video_third_quartile", th.IntegerType),
+        th.Property("video_end", th.IntegerType),
+        th.Property("vcr", th.IntegerType),
+    ).to_dict()
+
+    @property
+    def url_base(self) -> str:
+        return "https://reporting.groundtruth.com/demand/v2"
+
+    def get_records(self, context):
+        org_id = self.config["organization_id"]
+        accounts_url = f"{RESOURCE_API_BASE}/organizations/{org_id}/accounts"
+        headers = self.http_headers.copy()
+        headers["Accept"] = "application/json"
+        headers["User-Agent"] = "curl/7.79.1"
+        headers["Accept-Encoding"] = "gzip, deflate"
+        response = get_with_retry(accounts_url, headers=headers)
+        response.raise_for_status()
+        accounts = response.json().get("accounts", [])
+        # Filter accounts if account_ids config is provided (comma-separated string)
+        account_ids_config = set()
+        account_ids_str = self.config.get("account_ids")
+        if account_ids_str:
+            account_ids_config = set(s.strip() for s in account_ids_str.split(",") if s.strip())
+        for account in accounts:
+            account_id = account.get("id")
+            if not account_id:
+                continue
+            if account_ids_config and str(account_id) not in account_ids_config:
+                continue
+            campaigns_url = f"{RESOURCE_API_BASE}/campaigns"
+            campaign_headers = headers.copy()
+            campaign_headers["X-GT-ACCOUNT-ID"] = str(account_id)
+            campaign_response = get_with_retry(campaigns_url, headers=campaign_headers)
+            campaign_response.raise_for_status()
+            campaigns = campaign_response.json().get("campaigns", [])
+            for campaign in campaigns:
+                campaign_id = campaign.get("id")
+                campaign_name = campaign.get("name")
+                if not campaign_id:
+                    continue
+                # Determine start_date for incremental sync with lookback
+                lookback_days = int(self.config.get("lookback_days", 7))
+                starting_timestamp = self.get_starting_timestamp(context)
+                if starting_timestamp:
+                    start_date = starting_timestamp.date() - datetime.timedelta(days=lookback_days)
+                else:
+                    start_date = datetime.datetime.strptime(self.config["start_date"], "%Y-%m-%d").date()
+                end_date_str = self.config.get("end_date")
+                if end_date_str:
+                    end_date = datetime.datetime.strptime(end_date_str, "%Y-%m-%d").date()
+                else:
+                    end_date = datetime.date.today()
+                # 1-day chunking
+                chunk_size = datetime.timedelta(days=1)
+                current_start = start_date
+                while current_start <= end_date:
+                    current_end = current_start  # 1-day window
+                    stats_url = f"{self.url_base}/campaign/publisher/{campaign_id}"
+                    stats_headers = self.http_headers.copy()
+                    stats_headers["Accept"] = "application/json"
+                    stats_headers["User-Agent"] = "curl/7.79.1"
+                    stats_headers["Accept-Encoding"] = "gzip, deflate"
+                    params = {
+                        "start_date": current_start.strftime("%Y-%m-%d"),
+                        "end_date": current_end.strftime("%Y-%m-%d")
+                    }
+                    stats_response = get_with_retry(stats_url, headers=stats_headers, params=params)
+                    stats_response.raise_for_status()
+                    try:
+                        records = stats_response.json()
+                        if isinstance(records, dict):
+                            records = [records]
+                        for record in records:
+                            record["date"] = datetime.datetime.combine(current_start, datetime.time.min)
+                            record["campaign_id"] = campaign_id
+                            record["campaign_name"] = campaign_name
+                            # Ensure 'date' is always a string for Singer SDK compatibility
+                            if "date" in record and isinstance(record["date"], (datetime.date, datetime.datetime)):
+                                record["date"] = record["date"].isoformat()
+                            yield record
+                    except Exception as e:
+                        LOGGER.error("Failed to decode publisher stats response as JSON: %s", e)
+                        LOGGER.error("Raw response: %s", stats_response.text)
+                        raise
+                    current_start += chunk_size
+
+
+class CampaignDemographicStatsStream(GroundTruthStream):
+    """Stream for campaign-level demographic stats per campaign per day (age & gender)."""
+
+    name = "campaign_demographic_stats"
+    path = None  # Set dynamically per campaign
+    primary_keys = ["campaign_id", "adgroup_id", "age", "gender", "date"]
+    replication_key = "date"
+    schema = th.PropertiesList(
+        th.Property("date", th.DateTimeType),
+        th.Property("account_name", th.StringType),
+        th.Property("campaign_id", th.IntegerType),
+        th.Property("campaign_name", th.StringType),
+        th.Property("adgroup_id", th.IntegerType),
+        th.Property("adgroup_name", th.StringType),
+        th.Property("age", th.StringType),
+        th.Property("gender", th.StringType),
+        th.Property("impressions", th.IntegerType),
+        th.Property("clicks", th.IntegerType),
+        th.Property("spend", th.NumberType),
+        th.Property("ctr", th.NumberType),
+        th.Property("cpm", th.NumberType),
+        th.Property("total_sa", th.IntegerType),
+        th.Property("sar", th.IntegerType),
+        th.Property("click_to_call", th.IntegerType),
+        th.Property("directions", th.IntegerType),
+        th.Property("website", th.IntegerType),
+        th.Property("moreinfo", th.IntegerType),
+        th.Property("coupon", th.IntegerType),
+        th.Property("video", th.IntegerType),
+        th.Property("cumulative_reach", th.IntegerType),
+        th.Property("visits", th.IntegerType),
+        th.Property("open_hour_visits", th.IntegerType),
+        th.Property("projected_visits", th.IntegerType),
+        th.Property("projected_open_hour_visits", th.IntegerType),
+    ).to_dict()
+
+    def get_records(self, context):
+        org_id = self.config["organization_id"]
+        accounts_url = f"{RESOURCE_API_BASE}/organizations/{org_id}/accounts"
+        headers = self.http_headers.copy()
+        headers["Accept"] = "application/json"
+        headers["User-Agent"] = "curl/7.79.1"
+        headers["Accept-Encoding"] = "gzip, deflate"
+        response = get_with_retry(accounts_url, headers=headers)
+        response.raise_for_status()
+        accounts = response.json().get("accounts", [])
+        # Filter accounts if account_ids config is provided (comma-separated string)
+        account_ids_config = set()
+        account_ids_str = self.config.get("account_ids")
+        if account_ids_str:
+            account_ids_config = set(s.strip() for s in account_ids_str.split(",") if s.strip())
+        for account in accounts:
+            account_id = account.get("id")
+            if not account_id:
+                continue
+            if account_ids_config and str(account_id) not in account_ids_config:
+                continue
+            campaigns_url = f"{RESOURCE_API_BASE}/campaigns"
+            campaign_headers = headers.copy()
+            campaign_headers["X-GT-ACCOUNT-ID"] = str(account_id)
+            campaign_response = get_with_retry(campaigns_url, headers=campaign_headers)
+            campaign_response.raise_for_status()
+            campaigns = campaign_response.json().get("campaigns", [])
+            for campaign in campaigns:
+                campaign_id = campaign.get("id")
+                campaign_name = campaign.get("name")
+                if not campaign_id:
+                    continue
+                # Determine start_date for incremental sync with lookback
+                lookback_days = int(self.config.get("lookback_days", 7))
+                starting_timestamp = self.get_starting_timestamp(context)
+                if starting_timestamp:
+                    start_date = starting_timestamp.date() - datetime.timedelta(days=lookback_days)
+                else:
+                    start_date = datetime.datetime.strptime(self.config["start_date"], "%Y-%m-%d").date()
+                end_date_str = self.config.get("end_date")
+                if end_date_str:
+                    end_date = datetime.datetime.strptime(end_date_str, "%Y-%m-%d").date()
+                else:
+                    end_date = datetime.date.today()
+                # 1-day chunking
+                chunk_size = datetime.timedelta(days=1)
+                current_start = start_date
+                while current_start <= end_date:
+                    current_end = current_start  # 1-day window
+                    stats_url = f"{self.url_base.rstrip('/')}/campaign/demographic/{campaign_id}"
+                    stats_headers = self.http_headers.copy()
+                    stats_headers["Accept"] = "application/json"
+                    stats_headers["User-Agent"] = "curl/7.79.1"
+                    stats_headers["Accept-Encoding"] = "gzip, deflate"
+                    params = {
+                        "start_date": current_start.strftime("%Y-%m-%d"),
+                        "end_date": current_end.strftime("%Y-%m-%d"),
+                        "all_adgroups": 1,
+                        "key": 3,
+                    }
+                    stats_response = get_with_retry(stats_url, headers=stats_headers, params=params)
+                    stats_response.raise_for_status()
+                    try:
+                        records = stats_response.json()
+                        if isinstance(records, dict):
+                            records = [records]
+                        for record in records:
+                            record["date"] = datetime.datetime.combine(current_start, datetime.time.min)
+                            record["campaign_id"] = campaign_id
+                            record["campaign_name"] = campaign_name
+                            # Ensure 'date' is always a string for Singer SDK compatibility
+                            if "date" in record and isinstance(record["date"], (datetime.date, datetime.datetime)):
+                                record["date"] = record["date"].isoformat()
+                            yield record
+                    except Exception as e:
+                        LOGGER.error("Failed to decode demographic stats response as JSON: %s", e)
+                        LOGGER.error("Raw response: %s", stats_response.text)
+                        raise
+                    current_start += chunk_size
