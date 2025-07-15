@@ -35,8 +35,15 @@ def is_retryable_response(response):
 )
 def get_with_retry(*args, **kwargs):
     response = requests.get(*args, **kwargs)
-    if is_retryable_response(response):
+    try:
         response.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        LOGGER.error("HTTP error: %s", e)
+        LOGGER.error("Response body: %s", response.text)
+        if response.status_code >= 500 or response.status_code == 429:
+            raise  # Will be retried by tenacity
+        else:
+            raise
     return response
 
 
@@ -91,6 +98,8 @@ class CreativeStatsStream(GroundTruthStream):
         th.Property("external_adgroup_id", th.IntegerType),
         th.Property("oh_vst", th.IntegerType),
         th.Property("prj_vst", th.IntegerType),
+        th.Property("vcr", th.NumberType),
+        th.Property("ltr", th.NumberType),
     ).to_dict()
 
     def _parse_date(self, date_str):
@@ -164,7 +173,7 @@ class CreativeStatsStream(GroundTruthStream):
                 campaign_id = campaign.get("id")
                 if not campaign_id:
                     continue
-                stats_url = f"{self.url_base.rstrip('/')}/creatives/{campaign_id}/daily"
+                stats_url = f"{self.url_base}/creatives/{campaign_id}/daily"
                 stats_headers = self.http_headers.copy()
                 stats_headers["Accept"] = "application/json"
                 stats_headers["User-Agent"] = "curl/7.79.1"
@@ -383,6 +392,8 @@ class LocationStatsStreamBase(GroundTruthStream):
         th.Property("moreinfo", th.IntegerType),
         th.Property("directions", th.IntegerType),
         th.Property("click_to_call", th.IntegerType),
+        th.Property("vcr", th.NumberType),
+        th.Property("ltr", th.NumberType),
     ).to_dict()
 
     def get_records(self, context):
@@ -433,7 +444,7 @@ class LocationStatsStreamBase(GroundTruthStream):
                 current_start = start_date
                 while current_start <= end_date:
                     current_end = current_start  # Only one day per chunk
-                    stats_url = f"{self.url_base}/campaign/location/{campaign_id}"
+                    stats_url = f"{self.url_base}/campaign/locations/{campaign_id}"
                     stats_headers = self.http_headers.copy()
                     stats_headers["Accept"] = "application/json"
                     stats_headers["User-Agent"] = "curl/7.79.1"
@@ -604,6 +615,8 @@ class CampaignDemographicStatsStream(GroundTruthStream):
         th.Property("open_hour_visits", th.IntegerType),
         th.Property("projected_visits", th.IntegerType),
         th.Property("projected_open_hour_visits", th.IntegerType),
+        th.Property("vcr", th.NumberType),
+        th.Property("ltr", th.NumberType),
     ).to_dict()
 
     def get_records(self, context):
@@ -655,7 +668,7 @@ class CampaignDemographicStatsStream(GroundTruthStream):
                 current_start = start_date
                 while current_start <= end_date:
                     current_end = current_start  # 1-day window
-                    stats_url = f"{self.url_base.rstrip('/')}/campaign/demographic/{campaign_id}"
+                    stats_url = f"{self.url_base}/campaign/demographic/{campaign_id}"
                     stats_headers = self.http_headers.copy()
                     stats_headers["Accept"] = "application/json"
                     stats_headers["User-Agent"] = "curl/7.79.1"
