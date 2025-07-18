@@ -72,6 +72,8 @@ class CreativeStatsStream(GroundTruthStream):
         th.Property("advertiser_bid_type", th.StringType),
         th.Property("budget_type", th.StringType),
         th.Property("impressions", th.IntegerType),
+        th.Property("imp", th.IntegerType),
+        th.Property("clks", th.IntegerType),
         th.Property("clicks", th.IntegerType),
         th.Property("daily_reach", th.IntegerType),
         th.Property("ctr", th.NumberType),
